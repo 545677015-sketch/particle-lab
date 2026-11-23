@@ -148,9 +148,10 @@
 
 <script type="module">
 const THREE_SOURCES = [
-  'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js',
-  'https://unpkg.com/three@0.160.0/build/three.module.js',
-  'https://registry.npmmirror.com/three/0.160.0/files/build/three.module.js',
+  new URL('vendor/three.module.min.js', location.href).href, // 同源自托管，最快
+  'https://registry.npmmirror.com/three/0.160.0/files/build/three.module.min.js',
+  'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js',
+  'https://unpkg.com/three@0.160.0/build/three.module.min.js',
 ];
 const IS_MOBILE = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 const TREE_COUNT = IS_MOBILE ? 26000 : 62000;

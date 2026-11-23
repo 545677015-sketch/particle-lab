@@ -155,20 +155,19 @@
 <script type="module">
 /* ===================== 0. 常量 ===================== */
 const THREE_SOURCES = [
-  'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js',
-  'https://unpkg.com/three@0.160.0/build/three.module.js',
-  'https://registry.npmmirror.com/three/0.160.0/files/build/three.module.js',
+  new URL('vendor/three.module.min.js', location.href).href, // 同源自托管，最快
+  'https://registry.npmmirror.com/three/0.160.0/files/build/three.module.min.js',
+  'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js',
+  'https://unpkg.com/three@0.160.0/build/three.module.min.js',
 ];
-const MP_VERSION = '0.10.14';
-const MP_SOURCES = [
-  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/vision_bundle.mjs`,
-  `https://unpkg.com/@mediapipe/tasks-vision@${MP_VERSION}/vision_bundle.mjs`,
+// 手势资源全部自托管：googleapis 的模型源在国内连不通，npmmirror 又不带 CORS 头，
+// 所以把 @mediapipe/hands 运行时需要的文件放进 models/hands/，走同源加载。
+const HANDS_VERSION = '0.4.1675469240';
+const HANDS_BASES = [
+  new URL('models/hands/', location.href).href,
+  `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${HANDS_VERSION}/`,
+  `https://unpkg.com/@mediapipe/hands@${HANDS_VERSION}/`,
 ];
-const MP_WASM = [
-  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/wasm`,
-  `https://unpkg.com/@mediapipe/tasks-vision@${MP_VERSION}/wasm`,
-];
-const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
 const IS_MOBILE = /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 const PARTICLE_COUNT = IS_MOBILE ? 30000 : 80000;
@@ -206,61 +205,116 @@ const GESTURE = { IDLE: '静待', OPEN: '张开', PINCH: '捏合', FIST: '握拳
 /** 原始读数：present=是否检测到手，palm 为归一化坐标(0-1)，spread/pinch 为相对掌宽的比值 */
 function emptyRaw() { return { present: false, palmX: .5, palmY: .5, spread: 1.0, pinch: 1.0 }; }
 
-/** 摄像头 + MediaPipe，懒加载 */
-class MediaPipeSource {
-  constructor(video) { this.video = video; this.landmarker = null; this.lastTs = -1; this.ready = false; }
+/** 动态插入 UMD 脚本（hands.js 不是 ESM） */
+function loadScript(url, timeout = 25000) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.async = true;
+    const timer = setTimeout(() => { s.remove(); reject(new Error('加载超时')); }, timeout);
+    s.onload = () => { clearTimeout(timer); resolve(); };
+    s.onerror = () => { clearTimeout(timer); s.remove(); reject(new Error('加载失败')); };
+    document.head.appendChild(s);
+  });
+}
+
+/**
+ * 摄像头 + MediaPipe Hands（legacy solution）
+ *
+ * 不用 tasks-vision 的原因：它的模型来自 storage.googleapis.com，国内基本连不通，
+ * 表现就是「转很久然后失败」。legacy 包的模型随 npm 包发布，可以整体自托管，
+ * 运行时全部同源加载，不产生任何外网请求。
+ */
+class HandsSource {
+  constructor(video) {
+    this.video = video;
+    this.hands = null;
+    this.base = null;
+    this.latest = null;
+    this.frames = 0;
+    this.running = false;
+    this.loaded = false;
+  }
+
+  async loadResources(onProgress) {
+    if (this.loaded) return;
+    const t0 = performance.now();
+
+    if (!window.Hands) {
+      const errs = [];
+      for (const base of HANDS_BASES) {
+        onProgress && onProgress('正在加载手势识别库…');
+        try {
+          await loadScript(`${base}hands.js`);
+          if (window.Hands) { this.base = base; break; }
+        } catch (e) { errs.push(`${base} → ${e.message}`); }
+      }
+      if (!window.Hands) throw new Error('手势库加载失败：\n' + errs.join('\n'));
+    }
+    this.base = this.base || HANDS_BASES[0];
+
+    onProgress && onProgress('正在加载手部模型（首次约 10MB，之后走浏览器缓存）…');
+    const hands = new window.Hands({ locateFile: (f) => `${this.base}${f}` });
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    hands.onResults((res) => { this.latest = res; this.frames++; });
+    this.hands = hands;
+    this.loaded = true;
+    console.log(`[gesture] 资源就绪 ${(performance.now() - t0) | 0}ms，来源 ${this.base}`);
+  }
+
   async start(onProgress) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('当前环境不支持摄像头（需 http://localhost 或 https）');
     }
+    await this.loadResources(onProgress);
+    onProgress && onProgress('正在请求摄像头…');
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }, audio: false,
     });
     this.video.srcObject = stream;
     await this.video.play();
-
-    onProgress && onProgress('正在加载手势识别模块…');
-    const t0 = performance.now();
-    let mp = null, bundleErr = [];
-    for (const url of MP_SOURCES) {
-      try { mp = await import(/* @vite-ignore */ url); break; }
-      catch (e) { bundleErr.push(`${url} → ${e.message}`); }
-    }
-    if (!mp) throw new Error('手势识别模块加载失败：\n' + bundleErr.join('\n'));
-
-    let vision = null;
-    for (const base of MP_WASM) {
-      try { vision = await mp.FilesetResolver.forVisionTasks(base); break; }
-      catch (e) { /* 换下一个源 */ }
-    }
-    if (!vision) throw new Error('手势识别 WASM 加载失败，请检查网络后重试');
-
-    onProgress && onProgress('正在加载手部模型（首次约 7MB）…');
-    this.landmarker = await mp.HandLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: MP_MODEL, delegate: 'GPU' },
-      runningMode: 'VIDEO',
-      numHands: 1,
-      minHandDetectionConfidence: 0.5,
-      minHandPresenceConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-    });
-    this.ready = true;
-    console.log(`[gesture] 模型就绪，耗时 ${(performance.now() - t0) | 0}ms`);
+    this.running = true;
+    this.pump();
   }
+
+  /** legacy API 是「喂一帧取一帧」，用独立异步循环驱动，不阻塞渲染 */
+  async pump() {
+    while (this.running) {
+      if (this.video.readyState >= 2) {
+        try { await this.hands.send({ image: this.video }); }
+        catch (e) { /* 单帧失败不致命，继续下一帧 */ }
+      } else {
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    }
+  }
+
+  /** 用一张离屏画布喂一帧，触发模型真正加载并推理（供无摄像头环境验证链路） */
+  async probe(canvas) {
+    if (!this.hands) await this.loadResources();
+    await this.hands.send({ image: canvas });
+    return this.frames;
+  }
+
   stop() {
+    this.running = false;
     const s = this.video.srcObject;
     if (s) { s.getTracks().forEach((t) => t.stop()); this.video.srcObject = null; }
-    this.ready = false;
+    if (this.hands) { try { this.hands.close(); } catch (e) { /* 已关闭 */ } }
+    this.hands = null;
+    this.loaded = false;
+    this.latest = null;
   }
-  read(now) {
-    if (!this.ready || this.video.readyState < 2) return emptyRaw();
-    if (now - this.lastTs < 30) return this._cached || emptyRaw(); // 限制在 ~33fps
-    this.lastTs = now;
-    let res;
-    try { res = this.landmarker.detectForVideo(this.video, now); }
-    catch (e) { return emptyRaw(); }
-    const lm = res && res.landmarks && res.landmarks[0];
-    if (!lm) { this._cached = emptyRaw(); return this._cached; }
+
+  read() {
+    if (!this.running || !this.latest) return emptyRaw();
+    const lm = this.latest.multiHandLandmarks && this.latest.multiHandLandmarks[0];
+    if (!lm) return emptyRaw();
 
     // 掌心：腕 + 5 个掌指关节
     const palmIds = [0, 5, 9, 13, 17];
@@ -280,14 +334,13 @@ class MediaPipeSource {
     // 捏合：拇指尖(4) 到食指尖(8) 的距离 ÷ 掌宽
     const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / palmW;
 
-    this._cached = {
+    return {
       present: true,
       palmX: 1 - px,  // 视频镜像显示，坐标同步翻转
       palmY: py,
       spread,
       pinch,
     };
-    return this._cached;
   }
 }
 
@@ -572,7 +625,7 @@ async function main() {
 
   /* ---- 输入 ---- */
   const pointer = new PointerSource(canvas);
-  const mpSource = new MediaPipeSource($('cam'));
+  const mpSource = new HandsSource($('cam'));
   let source = pointer;
   let usingCamera = false;
   const filter = new GestureFilter();
@@ -819,6 +872,24 @@ async function main() {
     THREE, renderer, scene, camera, uniforms, filter, visual, pointer,
     counts: () => ({ particles: PARTICLE_COUNT }),
     state: () => ({ gesture: filter.gesture, s: { ...filter.s } }),
+    // 只加载手势资源（不请求摄像头），供无摄像头环境验证依赖链路
+    loadHands: () => mpSource.loadResources((m) => { bootMsg.textContent = m; }),
+    probeHands: async () => {
+      const c = document.createElement('canvas');
+      c.width = 320; c.height = 240;
+      const g = c.getContext('2d');
+      const grd = g.createLinearGradient(0, 0, 320, 240);
+      grd.addColorStop(0, '#123048');
+      grd.addColorStop(1, '#8ab0c8');
+      g.fillStyle = grd; g.fillRect(0, 0, 320, 240);
+      return mpSource.probe(c);
+    },
+    handsStatus: () => ({
+      lib: !!window.Hands,
+      loaded: mpSource.loaded,
+      frames: mpSource.frames,
+      base: mpSource.base,
+    }),
   };
 
   $('rCount').textContent = PARTICLE_COUNT.toLocaleString();

@@ -1,0 +1,8 @@
+﻿# 第三方资源与二进制：禁止换行转换，否则 wasm / 模型会被损坏
+vendor/** binary
+screenshots/** binary
+*.wasm binary
+*.tflite binary
+*.data binary
+*.binarypb binary
+*.png binary
