@@ -949,7 +949,11 @@ async function main() {
     counts: () => ({ particles: PARTICLE_COUNT }),
     state: () => ({ gesture: filter.gesture, s: { ...filter.s } }),
     // 只加载手势资源（不请求摄像头），供无摄像头环境验证依赖链路
-    loadHands: () => mpSource.loadResources((m) => { bootMsg.textContent = m; }),
+    loadHands: () => mpSource.loadResources((m, pct) => {
+      bootMsg.textContent = m;
+      const bar = $('bootBar');
+      if (pct != null) { bar.classList.add('show'); bar.firstElementChild.style.width = pct + '%'; }
+    }),
     probeHands: async () => {
       const c = document.createElement('canvas');
       c.width = 320; c.height = 240;
