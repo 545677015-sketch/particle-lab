@@ -49,6 +49,11 @@
   .btn[disabled]{opacity:.4;cursor:not-allowed}
   .btn.on{background:rgba(110,231,200,.18);border-color:rgba(110,231,200,.55);color:#c8fff0}
   .file{display:none}
+  .wish{width:100%;padding:9px 11px;border-radius:10px;border:1px solid var(--line);
+    background:rgba(255,255,255,.05);color:var(--ink);font-size:12px;font-family:inherit;
+    letter-spacing:.02em;outline:none;transition:.18s}
+  .wish::placeholder{color:var(--dim)}
+  .wish:focus{border-color:rgba(255,217,138,.55);background:rgba(255,217,138,.08)}
   .hintLine{font-size:10.5px;color:var(--dim);letter-spacing:.04em;text-align:center;line-height:1.6}
 
   #meters{position:absolute;left:20px;bottom:22px;padding:12px 14px;width:186px}
@@ -79,7 +84,8 @@
   #boot{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
     background:radial-gradient(circle at 50% 42%,#0a1622 0%,#03060c 72%);
     transition:opacity .6s;text-align:center;padding:24px}
-  #boot.done{opacity:0;pointer-events:none}
+  #boot.done{opacity:0;visibility:hidden;pointer-events:none;
+    transition:opacity .6s,visibility 0s .6s}
   #boot .ring{width:52px;height:52px;margin:0 auto 18px;border-radius:50%;
     border:2px solid rgba(110,231,200,.15);border-top-color:var(--mint);animation:spin 900ms linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -119,6 +125,7 @@
     <button class="btn primary" id="btnMusic">上传音乐</button>
     <button class="btn on" id="btnRotate">自动旋转：开</button>
     <button class="btn" id="btnShot">保存截图</button>
+    <input id="wishText" class="wish" maxlength="20" value="Merry Christmas" placeholder="输入祝福语…" title="树前的发光字牌">
     <div class="hintLine">拖拽旋转 · 滚轮缩放<br>轻点空白处隐藏界面</div>
   </div>
 
@@ -748,6 +755,13 @@ async function main() {
     toast('截图已保存');
   });
 
+  // 祝福字牌：输入即更新（防抖，避免每敲一个字都重建纹理）
+  let wishTimer = 0;
+  $('wishText').addEventListener('input', (e) => {
+    clearTimeout(wishTimer);
+    wishTimer = setTimeout(() => setWish(e.target.value.trim()), 260);
+  });
+
   let toastEl = null, toastTimer = 0;
   function toast(text, ms = 2400) {
     if (!toastEl) {
@@ -765,6 +779,82 @@ async function main() {
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { toastEl.style.opacity = '0'; }, ms);
   }
+
+  /* ---------- 祝福字牌 ---------- */
+  const WISH_MAX_W = 8.5;
+  let wishMesh = null;
+
+  function makeWishTexture(text) {
+    const family = '"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif';
+    const c = document.createElement('canvas');
+    const g = c.getContext('2d');
+    let fontSize = 110;
+    g.font = `700 ${fontSize}px ${family}`;
+    let textW = g.measureText(text).width;
+    if (textW > 560) {
+      fontSize = Math.max(46, Math.floor(fontSize * 560 / textW));
+      g.font = `700 ${fontSize}px ${family}`;
+      textW = g.measureText(text).width;
+    }
+    const padX = 72, padY = 52;
+    c.width = Math.ceil(textW + padX * 2);
+    c.height = Math.ceil(fontSize * 1.35 + padY * 2);
+
+    const ctx = c.getContext('2d');
+    ctx.font = `700 ${fontSize}px ${family}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const cx = c.width / 2, cy = c.height / 2;
+
+    // 多层外发光：加法混合下层层叠加才出「灯牌」感
+    ctx.shadowColor = 'rgba(255,168,60,1)';
+    for (const [blur, color] of [
+      [46, 'rgba(255,142,36,.55)'],
+      [30, 'rgba(255,186,82,.75)'],
+      [16, 'rgba(255,220,140,.95)'],
+      [8, '#fff8e6'],
+    ]) {
+      ctx.shadowBlur = blur;
+      ctx.fillStyle = color;
+      ctx.fillText(text, cx, cy);
+    }
+    // 细描边让字在暗背景上立住
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = 'rgba(255,236,190,.95)';
+    ctx.strokeText(text, cx, cy);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    return { texture: tex, aspect: c.width / c.height };
+  }
+
+  function setWish(text) {
+    const t = (text || 'Merry Christmas').slice(0, 20);
+    const { texture, aspect } = makeWishTexture(t);
+    const w = Math.min(WISH_MAX_W, 1.35 * aspect);
+    const h = w / aspect;
+    if (wishMesh) {
+      wishMesh.geometry.dispose();
+      if (wishMesh.material.map) wishMesh.material.map.dispose();
+      wishMesh.geometry = new THREE.PlaneGeometry(w, h);
+      wishMesh.material.map = texture;
+      wishMesh.material.needsUpdate = true;
+    } else {
+      wishMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, h),
+        new THREE.MeshBasicMaterial({
+          map: texture, transparent: true, depthWrite: false,
+          blending: THREE.AdditiveBlending, toneMapped: false,
+        }),
+      );
+      wishMesh.position.set(0, -1.85, 3.55);
+      world.add(wishMesh);
+    }
+    return wishMesh;
+  }
+  setWish('Merry Christmas');
 
   /* ---------- 主循环 ---------- */
   let last = performance.now(), fpsAcc = 0, fpsFrames = 0, fpsVal = 60, hudAcc = 0;
@@ -824,6 +914,14 @@ async function main() {
       m.rotateX(Math.sin(time * 0.9 + m.userData.phase * 1.7) * 0.03);
     }
 
+    // 祝福字牌：始终朝相机，随低音脉动
+    if (wishMesh) {
+      wishMesh.quaternion.copy(camera.quaternion);
+      wishMesh.scale.setScalar(1 + levels.bass * 0.10 + Math.sin(time * 1.3) * 0.012);
+      wishMesh.material.opacity = 0.92 + levels.bass * 0.08;
+      wishMesh.position.y = -1.85 + Math.sin(time * 0.8) * 0.07;
+    }
+
     // 相机
     if (!orbit.dragging) {
       idle += dt;
@@ -873,6 +971,8 @@ async function main() {
     counts: () => ({ tree: TREE_COUNT, snow: SNOW_COUNT, lights: LIGHT_COUNT, photos: photoFrames.length }),
     addPhotos: (files) => addPhotos(files),
     loadMusic: (file) => loadMusic(file),
+    setWish,
+    wish: () => wishMesh,
     levels,
     photoFrames,
   };
