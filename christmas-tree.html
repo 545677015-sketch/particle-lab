@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -125,7 +125,7 @@
     <button class="btn primary" id="btnMusic">上传音乐</button>
     <button class="btn on" id="btnRotate">自动旋转：开</button>
     <button class="btn" id="btnShot">保存截图</button>
-    <input id="wishText" class="wish" maxlength="20" value="Merry Christmas" placeholder="输入祝福语…" title="树前的发光字牌">
+    <input id="wishText" class="wish" maxlength="20" value="小朱老师" placeholder="输入祝福语…" title="树前的发光字牌">
     <div class="hintLine">拖拽旋转 · 滚轮缩放<br>轻点空白处隐藏界面</div>
   </div>
 
@@ -941,7 +941,7 @@ async function main() {
   }
 
   function setWish(text) {
-    const t = (text || 'Merry Christmas').slice(0, 20);
+    const t = (text || '小朱老师').slice(0, 20);
     const { texture, aspect } = makeWishTexture(t);
     const w = Math.min(WISH_MAX_W, 1.35 * aspect);
     const h = w / aspect;
@@ -964,7 +964,7 @@ async function main() {
     }
     return wishMesh;
   }
-  setWish('Merry Christmas');
+  setWish('小朱老师');
 
   /* ---------- 主循环 ---------- */
   let last = performance.now(), fpsAcc = 0, fpsFrames = 0, fpsVal = 60, hudAcc = 0;
