@@ -90,6 +90,11 @@
     animation:spin 900ms linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
   #boot .msg{font-size:12.5px;color:var(--dim);letter-spacing:.1em}
+  #bootBar{width:260px;height:4px;margin:16px auto 0;border-radius:2px;
+    background:rgba(255,255,255,.08);overflow:hidden;display:none}
+  #bootBar.show{display:block}
+  #bootBar > i{display:block;height:100%;width:0;border-radius:2px;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .2s linear}
   #boot .err{max-width:520px;font-size:13px;line-height:1.8;color:#ffb4b4}
   #boot .err code{color:#ffd479;font-size:11.5px;word-break:break-all}
   #boot .err h3{color:#ff8f8f;font-size:15px;margin:0 0 10px;letter-spacing:.06em}
@@ -149,6 +154,7 @@
   <div>
     <div class="ring"></div>
     <div class="msg" id="bootMsg">正在连接星尘…</div>
+    <div id="bootBar"><i></i></div>
   </div>
 </div>
 
@@ -218,6 +224,58 @@ function loadScript(url, timeout = 25000) {
   });
 }
 
+/** GitHub Pages 在国内会偶发连接超时，带退避重试 */
+async function fetchRetry(url, tries = 3, opts = {}) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, opts);
+      if (r.ok) return r;
+      lastErr = new Error(`HTTP ${r.status}`);
+    } catch (e) { lastErr = e; }
+    await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+  }
+  throw lastErr || new Error('请求失败');
+}
+
+/* 模型与 wasm：预取一遍并显示真实进度，之后 MediaPipe 的请求会命中 HTTP 缓存 */
+const HANDS_FILES = [
+  'hands.binarypb',
+  'hands_solution_packed_assets.data',
+  'hands_solution_packed_assets_loader.js',
+  'hands_solution_simd_wasm_bin.js',
+  'hands_solution_simd_wasm_bin.wasm',
+  'hand_landmark_full.tflite',
+];
+
+async function prefetchAll(base, onProgress) {
+  let total = 0;
+  const sizes = [];
+  for (const f of HANDS_FILES) {
+    let n = 0;
+    try {
+      const r = await fetchRetry(`${base}${f}`, 2, { method: 'HEAD' });
+      n = Number(r.headers.get('content-length')) || 0;
+    } catch (e) { /* 拿不到大小就靠已下载量估 */ }
+    sizes.push(n);
+    total += n;
+  }
+  let done = 0;
+  for (let i = 0; i < HANDS_FILES.length; i++) {
+    const f = HANDS_FILES[i];
+    const res = await fetchRetry(`${base}${f}`, 4);
+    if (!res.body) { done += sizes[i]; onProgress && onProgress(done, total || done); continue; }
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done: fin, value } = await reader.read();
+      if (fin) break;
+      done += value.length;
+      onProgress && onProgress(done, total || done);
+    }
+  }
+  return total || done;
+}
+
 /**
  * 摄像头 + MediaPipe Hands（legacy solution）
  *
@@ -253,7 +311,20 @@ class HandsSource {
     }
     this.base = this.base || HANDS_BASES[0];
 
-    onProgress && onProgress('正在加载手部模型（首次约 10MB，之后走浏览器缓存）…');
+    // 先带进度预取一遍：Pages 在国内慢，让用户看得到还剩多少而不是干转圈
+    if (onProgress) {
+      const mb = (n) => (n / 1048576).toFixed(1);
+      try {
+        await prefetchAll(this.base, (done, total) => {
+          const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+          onProgress(`正在下载手部模型 ${pct}%（${mb(done)} / ${mb(total)} MB）`, pct);
+        });
+      } catch (e) {
+        console.warn('[gesture] 预取失败，改由 MediaPipe 直接拉取', e);
+      }
+    }
+
+    onProgress && onProgress('正在初始化手部模型…', 100);
     const hands = new window.Hands({ locateFile: (f) => `${this.base}${f}` });
     hands.setOptions({
       maxNumHands: 1,
@@ -727,12 +798,17 @@ async function main() {
     bootEl.classList.remove('done');
     bootMsg.textContent = '正在请求摄像头…';
     try {
-      await mpSource.start((msg) => { bootMsg.textContent = msg; });
+      await mpSource.start((msg, pct) => {
+        bootMsg.textContent = msg;
+        const bar = $('bootBar');
+        if (pct != null) { bar.classList.add('show'); bar.firstElementChild.style.width = pct + '%'; }
+      });
       usingCamera = true; source = mpSource;
       btnCam.textContent = '关闭摄像头'; btnCam.classList.add('on');
       btnDemo.classList.remove('on');
       $('camWrap').classList.add('show');
       $('rMode').textContent = '摄像头';
+      $('bootBar').classList.remove('show');
       bootEl.classList.add('done');
     } catch (err) {
       console.error(err);
