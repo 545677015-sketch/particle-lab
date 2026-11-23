@@ -148,8 +148,9 @@
 
 <script type="module">
 const THREE_SOURCES = [
-  new URL('vendor/three.module.min.js', location.href).href, // 同源自托管，最快
+  // npmmirror 实测 28MB/s（GitHub Pages 只有 66-126KB/s），且带 CORS
   'https://registry.npmmirror.com/three/0.160.0/files/build/three.module.min.js',
+  new URL('vendor/three.module.min.js', location.href).href,
   'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js',
   'https://unpkg.com/three@0.160.0/build/three.module.min.js',
 ];

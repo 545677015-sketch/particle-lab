@@ -161,15 +161,17 @@
 <script type="module">
 /* ===================== 0. 常量 ===================== */
 const THREE_SOURCES = [
-  new URL('vendor/three.module.min.js', location.href).href, // 同源自托管，最快
+  // npmmirror 实测 28MB/s（GitHub Pages 只有 66-126KB/s），且带 CORS
   'https://registry.npmmirror.com/three/0.160.0/files/build/three.module.min.js',
+  new URL('vendor/three.module.min.js', location.href).href,
   'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js',
   'https://unpkg.com/three@0.160.0/build/three.module.min.js',
 ];
-// 手势资源全部自托管：googleapis 的模型源在国内连不通，npmmirror 又不带 CORS 头，
-// 所以把 @mediapipe/hands 运行时需要的文件放进 models/hands/，走同源加载。
+// 手势资源：优先 npmmirror（国内 28MB/s，带 CORS），自托管与 jsdelivr 依次兜底。
+// googleapis 的模型源在国内连不通，这是换掉 tasks-vision 的原因。
 const HANDS_VERSION = '0.4.1675469240';
 const HANDS_BASES = [
+  `https://registry.npmmirror.com/@mediapipe/hands/${HANDS_VERSION}/files/`,
   new URL('models/hands/', location.href).href,
   `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${HANDS_VERSION}/`,
   `https://unpkg.com/@mediapipe/hands@${HANDS_VERSION}/`,
@@ -311,16 +313,21 @@ class HandsSource {
     }
     this.base = this.base || HANDS_BASES[0];
 
-    // 先带进度预取一遍：Pages 在国内慢，让用户看得到还剩多少而不是干转圈
+    // 先带进度预取一遍：让用户看得到还剩多少，而不是干转圈
     if (onProgress) {
       const mb = (n) => (n / 1048576).toFixed(1);
-      try {
-        await prefetchAll(this.base, (done, total) => {
-          const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
-          onProgress(`正在下载手部模型 ${pct}%（${mb(done)} / ${mb(total)} MB）`, pct);
-        });
-      } catch (e) {
-        console.warn('[gesture] 预取失败，改由 MediaPipe 直接拉取', e);
+      const order = [this.base, ...HANDS_BASES.filter((b) => b !== this.base)];
+      for (const base of order) {
+        try {
+          await prefetchAll(base, (done, total) => {
+            const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+            onProgress(`正在下载手部模型 ${pct}%（${mb(done)} / ${mb(total)} MB）`, pct);
+          });
+          this.base = base;
+          break;
+        } catch (e) {
+          console.warn('[gesture] 该源预取失败，换下一个', base, e.message);
+        }
       }
     }
 
