@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -139,7 +139,7 @@
 
   <div id="player" class="panel">
     <button class="mini" id="btnPlay" title="播放/暂停">▶</button>
-    <div class="name" id="trackName">未载入音乐 · 使用内置节拍</div>
+    <div class="name" id="trackName">点击开启内置浪漫钢琴曲</div>
   </div>
 </div>
 
@@ -751,6 +751,7 @@ async function main() {
   audioEl.crossOrigin = 'anonymous';
   let actx = null, analyser = null, srcNode = null, freq = null;
   let playing = false;
+  let builtinBuffer = null, builtinSrc = null, builtinOn = false;
   const levels = { bass: 0, mid: 0, treble: 0 };
 
   function ensureAudioGraph() {
@@ -761,17 +762,150 @@ async function main() {
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.72;
       freq = new Uint8Array(analyser.frequencyBinCount);
-    }
-    if (!srcNode) {
-      srcNode = actx.createMediaElementSource(audioEl);
-      srcNode.connect(analyser);
       analyser.connect(actx.destination);
     }
     if (actx.state === 'suspended') actx.resume();
+    return actx;
+  }
+
+  /* ---------- 内置浪漫钢琴曲（程序合成，零文件、零版权） ---------- */
+  function makeImpulse(ctx, seconds, decay) {
+    const len = Math.ceil(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+    }
+    return buf;
+  }
+
+  /** 渲染一段 8 小节的钢琴小曲，返回 AudioBuffer 供循环播放 */
+  async function renderRomanticTrack(ctx) {
+    const sr = ctx.sampleRate;
+    const BPM = 72, BEAT = 60 / BPM, BAR = BEAT * 4;
+    const BARS = 8;
+    const total = BARS * BAR;
+    const off = new OfflineAudioContext(2, Math.ceil(sr * total), sr);
+    const midi = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+    const master = off.createGain();
+    master.gain.value = 0.42;
+    master.connect(off.destination);
+
+    const conv = off.createConvolver();
+    conv.buffer = makeImpulse(off, 2.6, 2.4);
+    const wet = off.createGain(); wet.gain.value = 0.5;
+    conv.connect(wet); wet.connect(master);
+    const dry = off.createGain(); dry.gain.value = 0.62;
+    dry.connect(master);
+
+    // 泛音叠加的钟琴音色：快攻击 + 长衰减
+    function key(m, t, dur, gain, bright) {
+      const f = midi(m);
+      const g = off.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(gain, t + 0.014);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      g.connect(dry); g.connect(conv);
+
+      const parts = [[1, 1], [2.004, 0.34 * bright], [3.01, 0.14 * bright], [4.02, 0.06 * bright]];
+      for (const [mult, amp] of parts) {
+        const o = off.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = f * mult;
+        const pg = off.createGain();
+        pg.gain.value = amp;
+        o.connect(pg); pg.connect(g);
+        o.start(t); o.stop(t + dur + 0.05);
+      }
+    }
+
+    // 柔和的和弦垫
+    function pad(notes, t, dur, gain) {
+      const g = off.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(gain, t + 0.9);
+      g.gain.linearRampToValueAtTime(0.0001, t + dur);
+      g.connect(conv); g.connect(dry);
+      for (const m of notes) {
+        const o = off.createOscillator();
+        o.type = 'triangle';
+        o.frequency.value = midi(m);
+        o.connect(g);
+        o.start(t); o.stop(t + dur + 0.1);
+      }
+    }
+
+    // I - V - vi - IV，两遍
+    const progression = [
+      { root: 48, chord: [60, 64, 67], mel: [[76, 0, 1.6], [79, 2, 1.2]] },
+      { root: 43, chord: [59, 62, 67], mel: [[74, 0.5, 1.4], [71, 2.2, 1.4]] },
+      { root: 45, chord: [57, 60, 64], mel: [[72, 0, 1.8], [69, 2.2, 1.2]] },
+      { root: 41, chord: [57, 60, 65], mel: [[77, 0.5, 1.5], [72, 2.2, 1.3]] },
+    ];
+    const melodyHigh = [
+      [[79, 0, 1.6], [84, 2, 1.2]],
+      [[83, 0.5, 1.4], [79, 2.2, 1.4]],
+      [[81, 0, 1.8], [76, 2.2, 1.2]],
+      [[84, 0.5, 1.5], [79, 2.2, 1.3]],
+    ];
+
+    for (let b = 0; b < BARS; b++) {
+      const t0 = b * BAR;
+      const prog = progression[b % 4];
+      const mel = b < 4 ? prog.mel : melodyHigh[b % 4];
+
+      // 低音根音，每小节两下
+      key(prog.root, t0, 2.4, 0.16, 0.5);
+      key(prog.root, t0 + BEAT * 2, 2.0, 0.11, 0.4);
+      // 和弦垫
+      pad(prog.chord, t0, BAR * 0.98, 0.035);
+      // 分解和弦琶音
+      const arp = [prog.chord[0], prog.chord[1], prog.chord[2], prog.chord[1] + 12];
+      for (let i = 0; i < 4; i++) {
+        key(arp[i] + 12, t0 + i * BEAT + (i === 1 || i === 3 ? 0.02 : 0), 1.5, 0.075, 0.95);
+      }
+      // 主旋律
+      for (const [m, off_, dur] of mel) {
+        key(m, t0 + off_ * BEAT, dur * BEAT, 0.13, 1.15);
+      }
+    }
+
+    return await off.startRendering();
+  }
+
+  async function startBuiltinMusic() {
+    const ctx = ensureAudioGraph();
+    if (!builtinBuffer) {
+      builtinBuffer = await renderRomanticTrack(ctx);
+    }
+    if (builtinSrc) { try { builtinSrc.stop(); } catch (e) { /* 已停 */ } }
+    builtinSrc = ctx.createBufferSource();
+    builtinSrc.buffer = builtinBuffer;
+    builtinSrc.loop = true;
+    builtinSrc.connect(analyser);
+    builtinSrc.start();
+    builtinOn = true;
+    playing = true;
+    $('btnPlay').textContent = '❚❚';
+    $('trackName').textContent = '内置 · 浪漫钢琴（循环）';
+  }
+
+  function stopBuiltinMusic() {
+    if (builtinSrc) { try { builtinSrc.stop(); } catch (e) { /* 已停 */ } builtinSrc = null; }
+    builtinOn = false;
+    playing = false;
+    $('btnPlay').textContent = '▶';
   }
 
   async function loadMusic(file) {
-    ensureAudioGraph();
+    const ctx = ensureAudioGraph();
+    // 首次上传音乐时才接媒体元素节点
+    if (!srcNode) {
+      srcNode = ctx.createMediaElementSource(audioEl);
+      srcNode.connect(analyser);
+    }
+    stopBuiltinMusic();
     if (audioEl.dataset.blobUrl) URL.revokeObjectURL(audioEl.dataset.blobUrl);
     const url = URL.createObjectURL(file);
     audioEl.dataset.blobUrl = url;
@@ -869,10 +1003,28 @@ async function main() {
   });
 
   $('btnPlay').addEventListener('click', async () => {
-    if (!audioEl.src) { toast('请先上传音乐'); return; }
-    ensureAudioGraph();
-    if (audioEl.paused) { await audioEl.play(); playing = true; $('btnPlay').textContent = '❚❚'; }
-    else { audioEl.pause(); playing = false; $('btnPlay').textContent = '▶'; }
+    if (audioEl.src) {
+      // 有上传的音乐时，优先控制它
+      ensureAudioGraph();
+      if (audioEl.paused) { stopBuiltinMusic(); await audioEl.play(); playing = true; $('btnPlay').textContent = '❚❚'; }
+      else { audioEl.pause(); playing = false; $('btnPlay').textContent = '▶'; }
+      return;
+    }
+    if (builtinOn) { stopBuiltinMusic(); return; }
+    try {
+      await startBuiltinMusic();
+    } catch (e) {
+      console.error('[audio] 内置曲播放失败', e);
+      toast('浏览器拦截了自动播放，点一下页面任意位置再试');
+    }
+  });
+
+  // 首次交互时自动把内置曲开起来（浏览器要求用户手势才能出声）
+  let musicKickTries = 0;
+  addEventListener('pointerdown', () => {
+    if (builtinOn || audioEl.src || musicKickTries > 4) return;
+    musicKickTries++;
+    startBuiltinMusic().catch(() => { /* 被拦就等下一次点击 */ });
   });
 
   $('btnShot').addEventListener('click', () => {
@@ -1107,6 +1259,8 @@ async function main() {
     setWish,
     wish: () => wishMesh,
     loadBuiltinPhotos,
+    startBuiltinMusic,
+    builtinState: () => ({ on: builtinOn, rendered: !!builtinBuffer }),
     levels,
     photoFrames,
     streaks,
