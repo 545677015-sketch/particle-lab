@@ -780,8 +780,8 @@ async function main() {
   }
 
   /** 渲染一段 8 小节的钢琴小曲，返回 AudioBuffer 供循环播放 */
-  async function renderRomanticTrack(ctx) {
-    const sr = ctx.sampleRate;
+  async function renderRomanticTrack(sampleRate) {
+    const sr = sampleRate;
     const BPM = 72, BEAT = 60 / BPM, BAR = BEAT * 4;
     const BARS = 8;
     const total = BARS * BAR;
@@ -789,7 +789,7 @@ async function main() {
     const midi = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
     const master = off.createGain();
-    master.gain.value = 0.42;
+    master.gain.value = 0.62;
     master.connect(off.destination);
 
     const conv = off.createConvolver();
@@ -874,14 +874,43 @@ async function main() {
     return await off.startRendering();
   }
 
+  /** 预热：渲染不需要用户手势，提前做好，点击时就只剩 start()，iOS 上更可靠 */
+  let builtinPeak = 0;
+  async function prewarmBuiltin() {
+    if (builtinBuffer) return builtinBuffer;
+    let sr = 44100;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const probe = new AC();
+      sr = probe.sampleRate;
+      probe.close();
+    } catch (e) { /* 用默认采样率 */ }
+    const buf = await renderRomanticTrack(sr);
+
+    // 归一化：合成出来的原始峰值只有 0.16 左右，直接播几乎听不见
+    let peak = 0;
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < d.length; i++) peak = Math.max(peak, Math.abs(d[i]));
+    }
+    const scale = peak > 1e-4 ? 0.9 / peak : 1;
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < d.length; i++) d[i] *= scale;
+    }
+    builtinPeak = Math.min(1, peak * scale);
+    builtinBuffer = buf;
+    console.log(`[audio] 内置曲就绪 ${buf.duration.toFixed(1)}s @${sr}Hz 峰值 ${peak.toFixed(3)} → ${builtinPeak.toFixed(3)}（×${scale.toFixed(1)}）`);
+    return buf;
+  }
+
   async function startBuiltinMusic() {
     const ctx = ensureAudioGraph();
-    if (!builtinBuffer) {
-      builtinBuffer = await renderRomanticTrack(ctx);
-    }
+    try { await ctx.resume(); } catch (e) { /* 某些浏览器不支持 resume 返回 Promise */ }
+    const buf = builtinBuffer || await prewarmBuiltin();
     if (builtinSrc) { try { builtinSrc.stop(); } catch (e) { /* 已停 */ } }
     builtinSrc = ctx.createBufferSource();
-    builtinSrc.buffer = builtinBuffer;
+    builtinSrc.buffer = buf;
     builtinSrc.loop = true;
     builtinSrc.connect(analyser);
     builtinSrc.start();
@@ -889,6 +918,7 @@ async function main() {
     playing = true;
     $('btnPlay').textContent = '❚❚';
     $('trackName').textContent = '内置 · 浪漫钢琴（循环）';
+    if (ctx.state !== 'running') toast('浏览器未允许播放，请再点一下页面', 3000);
   }
 
   function stopBuiltinMusic() {
@@ -929,9 +959,9 @@ async function main() {
       analyser.getByteFrequencyData(freq);
       const avg = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += freq[i]; return s / (b - a) / 255; };
       return {
-        bass: Math.min(1, avg(1, 9) * 1.9),
-        mid: Math.min(1, avg(9, 42) * 1.7),
-        treble: Math.min(1, avg(42, 200) * 2.2),
+        bass: Math.min(1, avg(1, 9) * 1.15),
+        mid: Math.min(1, avg(9, 42) * 1.2),
+        treble: Math.min(1, avg(42, 200) * 2.8),
       };
     }
     // 无音乐：合成节拍，保证画面不静止
@@ -1260,7 +1290,9 @@ async function main() {
     wish: () => wishMesh,
     loadBuiltinPhotos,
     startBuiltinMusic,
-    builtinState: () => ({ on: builtinOn, rendered: !!builtinBuffer }),
+    builtinState: () => ({ on: builtinOn, rendered: !!builtinBuffer, peak: +builtinPeak.toFixed(3), ctx: actx ? actx.state : null }),
+    prewarmBuiltin,
+    resumeAudio: () => (actx ? actx.resume() : null),
     levels,
     photoFrames,
     streaks,
@@ -1279,6 +1311,8 @@ async function main() {
 
   // 首帧之后再把内置照片挂上去，不拖慢首屏
   setTimeout(() => { loadBuiltinPhotos().catch((e) => console.warn('[photo] 内置照片加载失败', e)); }, 700);
+  // 提前把内置曲渲染好（渲染不需要用户手势），点击时只剩 start()
+  setTimeout(() => { prewarmBuiltin().catch((e) => console.warn('[audio] 内置曲预渲染失败', e)); }, 1600);
 }
 
 main().catch((err) => {
