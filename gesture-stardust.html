@@ -24,7 +24,7 @@
 
   /* ---------- HUD ---------- */
   #hud{position:fixed;inset:0;pointer-events:none;z-index:10;transition:opacity .25s}
-  #hud.hidden{opacity:0}
+  #hud.hidden{opacity:0;pointer-events:none}
   .panel{background:var(--glass);border:1px solid var(--line);border-radius:14px;
     backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
     box-shadow:0 8px 30px rgba(0,0,0,.45)}
@@ -129,7 +129,7 @@
   <div id="hint" class="panel">
     <kbd>拖拽</kbd> 旋转 · <kbd>滚轮</kbd> 缩放 ·
     <kbd>1</kbd> 张开 <kbd>2</kbd> 捏合 <kbd>3</kbd> 握拳 <kbd>4</kbd> 静待 ·
-    <kbd>H</kbd> 隐藏界面
+    <kbd>H</kbd> 或轻点空白处 隐藏界面
   </div>
 
   <div id="toolbar" class="panel">
@@ -715,6 +715,7 @@ async function main() {
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     orbit.dragging = true; lastX = e.clientX; lastY = e.clientY;
+    tapStart = { x: e.clientX, y: e.clientY, t: performance.now() };
     canvas.classList.add('dragging');
     canvas.setPointerCapture?.(e.pointerId);
   });
@@ -725,7 +726,22 @@ async function main() {
     lastX = e.clientX; lastY = e.clientY;
     autoTimer = 0;
   });
-  const endDrag = () => { orbit.dragging = false; canvas.classList.remove('dragging'); };
+  // 轻点空白处 = 隐藏/显示所有悬浮面板；拖拽旋转不触发
+  let tapStart = null;
+  function toggleHud(force) {
+    const hud = $('hud');
+    const hide = force != null ? force : !hud.classList.contains('hidden');
+    hud.classList.toggle('hidden', hide);
+    if (hide) toast('点击屏幕空白处恢复界面', 2400);
+  }
+  const endDrag = (e) => {
+    orbit.dragging = false; canvas.classList.remove('dragging');
+    if (tapStart && e && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) < 8
+        && performance.now() - tapStart.t < 350) {
+      toggleHud();
+    }
+    tapStart = null;
+  };
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
   canvas.addEventListener('wheel', (e) => {
@@ -779,7 +795,7 @@ async function main() {
     btnCam.classList.remove('primary');
   }
   if (matchMedia('(pointer: coarse)').matches) {
-    $('hint').innerHTML = '<kbd>拖拽</kbd> 旋转 · <kbd>双指</kbd> 缩放 · 点下方按钮切换手势';
+    $('hint').innerHTML = '<kbd>拖拽</kbd> 旋转 · <kbd>双指</kbd> 缩放 · 点下方按钮切换手势 · 轻点空白隐藏界面';
   }
   function setDemo() {
     usingCamera = false; source = pointer;
