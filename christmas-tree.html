@@ -374,6 +374,40 @@ const SNOW_FRAG = /* glsl */`
   }
 `;
 
+/* 流星：一条流星 = 一串粒子，头亮尾暗，整串沿方向推进 */
+const STREAK_VERT = /* glsl */`
+  attribute float aTail;
+  attribute float aSize;
+  uniform float uPixelRatio;
+  varying float vAlpha;
+  varying float vTail;
+
+  void main() {
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * mv;
+    float shrink = 1.0 - aTail * 0.62;
+    gl_PointSize = clamp(aSize * uPixelRatio * shrink * (18.0 / max(-mv.z, 2.0)), 0.8, 34.0);
+    vAlpha = pow(1.0 - aTail, 1.35);
+    vTail = aTail;
+  }
+`;
+
+const STREAK_FRAG = /* glsl */`
+  varying float vAlpha;
+  varying float vTail;
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    if (d > 0.5) discard;
+    float soft = smoothstep(0.5, 0.0, d);
+    vec3 head = vec3(1.0, 0.97, 0.9);
+    vec3 tail = vec3(0.52, 0.76, 1.0);
+    vec3 col = mix(head, tail, vTail);
+    float core = smoothstep(0.35, 0.0, vTail);  // 头部再加一层亮芯
+    gl_FragColor = vec4(col + core * 0.55, soft * vAlpha);
+  }
+`;
+
 /* ---------- 主程序 ---------- */
 let THREE;
 
@@ -531,6 +565,91 @@ async function main() {
   }));
   snow.frustumCulled = false;
   scene.add(snow);
+
+  /* ---------- 流星 ---------- */
+  const STREAK_N = 6, STREAK_TAIL = 34;
+  const STREAK_VERTS = STREAK_N * STREAK_TAIL;
+  const streakPos = new Float32Array(STREAK_VERTS * 3);
+  const streakTailAttr = new Float32Array(STREAK_VERTS);
+  const streakSizeAttr = new Float32Array(STREAK_VERTS);
+  for (let i = 0; i < STREAK_N; i++) {
+    for (let j = 0; j < STREAK_TAIL; j++) {
+      const idx = i * STREAK_TAIL + j;
+      streakTailAttr[idx] = j / (STREAK_TAIL - 1);
+      streakSizeAttr[idx] = 18 - Math.random() * 3;
+      streakPos[idx * 3 + 1] = 9999; // 初始藏在视野外
+    }
+  }
+  const streakGeo = new THREE.BufferGeometry();
+  streakGeo.setAttribute('position', new THREE.BufferAttribute(streakPos, 3));
+  streakGeo.setAttribute('aTail', new THREE.BufferAttribute(streakTailAttr, 1));
+  streakGeo.setAttribute('aSize', new THREE.BufferAttribute(streakSizeAttr, 1));
+  const streakUniforms = { uPixelRatio: { value: Math.min(devicePixelRatio || 1, 2) } };
+  const streakPoints = new THREE.Points(streakGeo, new THREE.ShaderMaterial({
+    uniforms: streakUniforms, vertexShader: STREAK_VERT, fragmentShader: STREAK_FRAG,
+    transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+  }));
+  streakPoints.frustumCulled = false;
+  scene.add(streakPoints);
+
+  const streaks = Array.from({ length: STREAK_N }, () => ({
+    active: false, wait: 0.8 + Math.random() * 6, pos: new THREE.Vector3(),
+    dir: new THREE.Vector3(), len: 9, speed: 40, life: 0, ttl: 1.6,
+  }));
+
+  function spawnStreak(s) {
+    s.active = true;
+    s.life = 0;
+    s.ttl = 0.85 + Math.random() * 0.85;
+    s.speed = 26 + Math.random() * 24;
+    s.len = 7 + Math.random() * 6.5;
+    const fromLeft = Math.random() < 0.5;
+    s.pos.set(
+      fromLeft ? -15 - Math.random() * 10 : 15 + Math.random() * 10,
+      7 + Math.random() * 8,
+      -14 + Math.random() * 20,
+    );
+    const dx = (fromLeft ? 1 : -1) * (0.25 + Math.random() * 0.95);
+    const dy = -(0.5 + Math.random() * 0.7);
+    const dz = (Math.random() - 0.5) * 0.4;
+    s.dir.set(dx, dy, dz).normalize();
+  }
+
+  function hideStreakSlots(i) {
+    for (let j = 0; j < STREAK_TAIL; j++) {
+      streakPos[(i * STREAK_TAIL + j) * 3 + 1] = 9999;
+    }
+  }
+
+  function updateStreaks(dt) {
+    let dirty = false;
+    for (let i = 0; i < STREAK_N; i++) {
+      const s = streaks[i];
+      if (!s.active) {
+        s.wait -= dt;
+        if (s.wait <= 0) { spawnStreak(s); dirty = true; }
+        else continue;
+      }
+      s.life += dt;
+      if (s.life > s.ttl) {
+        s.active = false;
+        s.wait = 2.5 + Math.random() * 9;  // 不定时，平均 4-5 秒一条
+        hideStreakSlots(i);
+        dirty = true;
+        continue;
+      }
+      s.pos.addScaledVector(s.dir, s.speed * dt);
+      for (let j = 0; j < STREAK_TAIL; j++) {
+        const k = (i * STREAK_TAIL + j) * 3;
+        const back = (j / (STREAK_TAIL - 1)) * s.len;
+        streakPos[k] = s.pos.x - s.dir.x * back;
+        streakPos[k + 1] = s.pos.y - s.dir.y * back;
+        streakPos[k + 2] = s.pos.z - s.dir.z * back;
+      }
+      dirty = true;
+    }
+    if (dirty) streakGeo.attributes.position.needsUpdate = true;
+  }
 
   /* ---------- 彩球（程序生成，保证初始画面不空） ---------- */
   const ornamentColors = [0xff5a5a, 0xffd166, 0x6ee7c8];
@@ -885,6 +1004,8 @@ async function main() {
     snowUniforms.uTime.value = time;
     snowUniforms.uTreble.value = levels.treble;
 
+    updateStreaks(dt);
+
     // 树顶星：高频闪烁
     const starPulse = 0.85 + levels.treble * 1.5;
     star.scale.setScalar(3.0 * starPulse);
@@ -962,6 +1083,7 @@ async function main() {
     treeUniforms.uPixelRatio.value = pr;
     lightUniforms.uPixelRatio.value = pr;
     snowUniforms.uPixelRatio.value = pr;
+    streakUniforms.uPixelRatio.value = pr;
   }
   addEventListener('resize', resize);
 
@@ -975,6 +1097,8 @@ async function main() {
     wish: () => wishMesh,
     levels,
     photoFrames,
+    streaks,
+    forceStreak: (i = 0) => { spawnStreak(streaks[i % STREAK_N]); },
   };
 
   $('rCount').textContent = TREE_COUNT.toLocaleString();
