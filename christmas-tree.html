@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -751,7 +751,6 @@ async function main() {
   audioEl.crossOrigin = 'anonymous';
   let actx = null, analyser = null, srcNode = null, freq = null;
   let playing = false;
-  let builtinBuffer = null, builtinSrc = null, builtinOn = false;
   const levels = { bass: 0, mid: 0, treble: 0 };
 
   function ensureAudioGraph() {
@@ -768,161 +767,42 @@ async function main() {
     return actx;
   }
 
-  /* ---------- 内置浪漫钢琴曲（程序合成，零文件、零版权） ---------- */
-  function makeImpulse(ctx, seconds, decay) {
-    const len = Math.ceil(ctx.sampleRate * seconds);
-    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
-    for (let c = 0; c < 2; c++) {
-      const d = buf.getChannelData(c);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+  /* ---------- 内置浪漫钢琴曲（本地 mp3，走 <audio>，兼容性最好） ---------- */
+  const BUILTIN_TRACK = new URL('audio/romantic.mp3', location.href).href;
+  let builtinOn = false;
+
+  function hookMediaElement() {
+    const ctx = ensureAudioGraph();
+    if (!srcNode) {
+      srcNode = ctx.createMediaElementSource(audioEl);
+      srcNode.connect(analyser);
     }
-    return buf;
-  }
-
-  /** 渲染一段 8 小节的钢琴小曲，返回 AudioBuffer 供循环播放 */
-  async function renderRomanticTrack(sampleRate) {
-    const sr = sampleRate;
-    const BPM = 72, BEAT = 60 / BPM, BAR = BEAT * 4;
-    const BARS = 8;
-    const total = BARS * BAR;
-    const off = new OfflineAudioContext(2, Math.ceil(sr * total), sr);
-    const midi = (m) => 440 * Math.pow(2, (m - 69) / 12);
-
-    const master = off.createGain();
-    master.gain.value = 0.62;
-    master.connect(off.destination);
-
-    const conv = off.createConvolver();
-    conv.buffer = makeImpulse(off, 2.6, 2.4);
-    const wet = off.createGain(); wet.gain.value = 0.5;
-    conv.connect(wet); wet.connect(master);
-    const dry = off.createGain(); dry.gain.value = 0.62;
-    dry.connect(master);
-
-    // 泛音叠加的钟琴音色：快攻击 + 长衰减
-    function key(m, t, dur, gain, bright) {
-      const f = midi(m);
-      const g = off.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.linearRampToValueAtTime(gain, t + 0.014);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      g.connect(dry); g.connect(conv);
-
-      const parts = [[1, 1], [2.004, 0.34 * bright], [3.01, 0.14 * bright], [4.02, 0.06 * bright]];
-      for (const [mult, amp] of parts) {
-        const o = off.createOscillator();
-        o.type = 'sine';
-        o.frequency.value = f * mult;
-        const pg = off.createGain();
-        pg.gain.value = amp;
-        o.connect(pg); pg.connect(g);
-        o.start(t); o.stop(t + dur + 0.05);
-      }
-    }
-
-    // 柔和的和弦垫
-    function pad(notes, t, dur, gain) {
-      const g = off.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.linearRampToValueAtTime(gain, t + 0.9);
-      g.gain.linearRampToValueAtTime(0.0001, t + dur);
-      g.connect(conv); g.connect(dry);
-      for (const m of notes) {
-        const o = off.createOscillator();
-        o.type = 'triangle';
-        o.frequency.value = midi(m);
-        o.connect(g);
-        o.start(t); o.stop(t + dur + 0.1);
-      }
-    }
-
-    // I - V - vi - IV，两遍
-    const progression = [
-      { root: 48, chord: [60, 64, 67], mel: [[76, 0, 1.6], [79, 2, 1.2]] },
-      { root: 43, chord: [59, 62, 67], mel: [[74, 0.5, 1.4], [71, 2.2, 1.4]] },
-      { root: 45, chord: [57, 60, 64], mel: [[72, 0, 1.8], [69, 2.2, 1.2]] },
-      { root: 41, chord: [57, 60, 65], mel: [[77, 0.5, 1.5], [72, 2.2, 1.3]] },
-    ];
-    const melodyHigh = [
-      [[79, 0, 1.6], [84, 2, 1.2]],
-      [[83, 0.5, 1.4], [79, 2.2, 1.4]],
-      [[81, 0, 1.8], [76, 2.2, 1.2]],
-      [[84, 0.5, 1.5], [79, 2.2, 1.3]],
-    ];
-
-    for (let b = 0; b < BARS; b++) {
-      const t0 = b * BAR;
-      const prog = progression[b % 4];
-      const mel = b < 4 ? prog.mel : melodyHigh[b % 4];
-
-      // 低音根音，每小节两下
-      key(prog.root, t0, 2.4, 0.16, 0.5);
-      key(prog.root, t0 + BEAT * 2, 2.0, 0.11, 0.4);
-      // 和弦垫
-      pad(prog.chord, t0, BAR * 0.98, 0.035);
-      // 分解和弦琶音
-      const arp = [prog.chord[0], prog.chord[1], prog.chord[2], prog.chord[1] + 12];
-      for (let i = 0; i < 4; i++) {
-        key(arp[i] + 12, t0 + i * BEAT + (i === 1 || i === 3 ? 0.02 : 0), 1.5, 0.075, 0.95);
-      }
-      // 主旋律
-      for (const [m, off_, dur] of mel) {
-        key(m, t0 + off_ * BEAT, dur * BEAT, 0.13, 1.15);
-      }
-    }
-
-    return await off.startRendering();
-  }
-
-  /** 预热：渲染不需要用户手势，提前做好，点击时就只剩 start()，iOS 上更可靠 */
-  let builtinPeak = 0;
-  async function prewarmBuiltin() {
-    if (builtinBuffer) return builtinBuffer;
-    let sr = 44100;
-    try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      const probe = new AC();
-      sr = probe.sampleRate;
-      probe.close();
-    } catch (e) { /* 用默认采样率 */ }
-    const buf = await renderRomanticTrack(sr);
-
-    // 归一化：合成出来的原始峰值只有 0.16 左右，直接播几乎听不见
-    let peak = 0;
-    for (let c = 0; c < buf.numberOfChannels; c++) {
-      const d = buf.getChannelData(c);
-      for (let i = 0; i < d.length; i++) peak = Math.max(peak, Math.abs(d[i]));
-    }
-    const scale = peak > 1e-4 ? 0.9 / peak : 1;
-    for (let c = 0; c < buf.numberOfChannels; c++) {
-      const d = buf.getChannelData(c);
-      for (let i = 0; i < d.length; i++) d[i] *= scale;
-    }
-    builtinPeak = Math.min(1, peak * scale);
-    builtinBuffer = buf;
-    console.log(`[audio] 内置曲就绪 ${buf.duration.toFixed(1)}s @${sr}Hz 峰值 ${peak.toFixed(3)} → ${builtinPeak.toFixed(3)}（×${scale.toFixed(1)}）`);
-    return buf;
+    return ctx;
   }
 
   async function startBuiltinMusic() {
-    const ctx = ensureAudioGraph();
-    try { await ctx.resume(); } catch (e) { /* 某些浏览器不支持 resume 返回 Promise */ }
-    const buf = builtinBuffer || await prewarmBuiltin();
-    if (builtinSrc) { try { builtinSrc.stop(); } catch (e) { /* 已停 */ } }
-    builtinSrc = ctx.createBufferSource();
-    builtinSrc.buffer = buf;
-    builtinSrc.loop = true;
-    builtinSrc.connect(analyser);
-    builtinSrc.start();
+    const ctx = hookMediaElement();
+    audioEl.loop = true;
+    if (audioEl.src !== BUILTIN_TRACK) {
+      if (audioEl.dataset.blobUrl) { URL.revokeObjectURL(audioEl.dataset.blobUrl); delete audioEl.dataset.blobUrl; }
+      audioEl.src = BUILTIN_TRACK;
+    }
+    try { await ctx.resume(); } catch (e) { /* 忽略 */ }
+    try {
+      await audioEl.play();
+    } catch (e) {
+      console.warn('[audio] 内置曲播放被拦', e);
+      toast('浏览器拦截了播放，请再点一下页面', 3200);
+      return;
+    }
     builtinOn = true;
     playing = true;
     $('btnPlay').textContent = '❚❚';
     $('trackName').textContent = '内置 · 浪漫钢琴（循环）';
-    if (ctx.state !== 'running') toast('浏览器未允许播放，请再点一下页面', 3000);
   }
 
   function stopBuiltinMusic() {
-    if (builtinSrc) { try { builtinSrc.stop(); } catch (e) { /* 已停 */ } builtinSrc = null; }
+    if (audioEl.src === BUILTIN_TRACK) audioEl.pause();
     builtinOn = false;
     playing = false;
     $('btnPlay').textContent = '▶';
@@ -1033,14 +913,15 @@ async function main() {
   });
 
   $('btnPlay').addEventListener('click', async () => {
-    if (audioEl.src) {
-      // 有上传的音乐时，优先控制它
+    const uploaded = audioEl.src && audioEl.src !== BUILTIN_TRACK;
+    if (uploaded) {
+      // 用户上传的音乐优先
       ensureAudioGraph();
-      if (audioEl.paused) { stopBuiltinMusic(); await audioEl.play(); playing = true; $('btnPlay').textContent = '❚❚'; }
+      if (audioEl.paused) { await audioEl.play(); playing = true; $('btnPlay').textContent = '❚❚'; }
       else { audioEl.pause(); playing = false; $('btnPlay').textContent = '▶'; }
       return;
     }
-    if (builtinOn) { stopBuiltinMusic(); return; }
+    if (builtinOn && !audioEl.paused) { stopBuiltinMusic(); return; }
     try {
       await startBuiltinMusic();
     } catch (e) {
@@ -1052,7 +933,9 @@ async function main() {
   // 首次交互时自动把内置曲开起来（浏览器要求用户手势才能出声）
   let musicKickTries = 0;
   addEventListener('pointerdown', () => {
-    if (builtinOn || audioEl.src || musicKickTries > 4) return;
+    // 预加载已经把 src 设成内置曲了，所以判断"是否用户上传"要看 src 是否指向内置曲
+    const uploaded = audioEl.src && audioEl.src !== BUILTIN_TRACK;
+    if (builtinOn || uploaded || musicKickTries > 5) return;
     musicKickTries++;
     startBuiltinMusic().catch(() => { /* 被拦就等下一次点击 */ });
   });
@@ -1290,8 +1173,7 @@ async function main() {
     wish: () => wishMesh,
     loadBuiltinPhotos,
     startBuiltinMusic,
-    builtinState: () => ({ on: builtinOn, rendered: !!builtinBuffer, peak: +builtinPeak.toFixed(3), ctx: actx ? actx.state : null }),
-    prewarmBuiltin,
+    builtinState: () => ({ on: builtinOn, ctx: actx ? actx.state : null, src: audioEl.src.split('/').pop() }),
     resumeAudio: () => (actx ? actx.resume() : null),
     levels,
     photoFrames,
@@ -1311,8 +1193,11 @@ async function main() {
 
   // 首帧之后再把内置照片挂上去，不拖慢首屏
   setTimeout(() => { loadBuiltinPhotos().catch((e) => console.warn('[photo] 内置照片加载失败', e)); }, 700);
-  // 提前把内置曲渲染好（渲染不需要用户手势），点击时只剩 start()
-  setTimeout(() => { prewarmBuiltin().catch((e) => console.warn('[audio] 内置曲预渲染失败', e)); }, 1600);
+  // 提前把 mp3 下载下来（不播放），点击时直接出声
+  setTimeout(() => {
+    try { audioEl.preload = 'auto'; audioEl.src = BUILTIN_TRACK; }
+    catch (e) { console.warn('[audio] 内置曲预载失败', e); }
+  }, 800);
 }
 
 main().catch((err) => {
